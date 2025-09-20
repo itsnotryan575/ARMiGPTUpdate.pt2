@@ -267,6 +267,7 @@ const styles = StyleSheet.create({
     color: '#FFFFFF',
     fontSize: 16,
     fontWeight: '600',
+  },
   proofStrip: {
     alignItems: 'center',
     marginTop: 40,

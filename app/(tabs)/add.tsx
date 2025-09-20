@@ -277,15 +277,50 @@ export default function AddInteractionScreen() {
   };
 
   const executeCreateReminder = async (reminderData: any) => {
-    const scheduledDate = new Date(reminderData.scheduledFor);
+    // Parse and validate the scheduled date
+    let scheduledDate;
+    try {
+      scheduledDate = new Date(reminderData.scheduledFor);
+      if (isNaN(scheduledDate.getTime())) {
+        throw new Error('Invalid date format');
+      }
+    } catch (error) {
+      console.error('Invalid scheduled date:', reminderData.scheduledFor);
+      throw new Error('Invalid reminder date provided by AI');
+    }
     
-    // Ensure notification time is at least 5 seconds in the future
+    // Ensure the scheduled time is in the future
     const now = new Date();
-    const minNotificationTime = new Date(now.getTime() + 6000); // 6 seconds buffer
+    if (scheduledDate.getTime() <= now.getTime()) {
+      // If the AI scheduled something in the past, adjust to a reasonable future time
+      scheduledDate = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
+      scheduledDate.setHours(12, 0, 0, 0); // Set to noon
+      console.warn('AI scheduled reminder in the past, adjusted to:', scheduledDate.toISOString());
+    }
+    
+    // Calculate notification time with minimum buffer
+    const minNotificationTime = new Date(now.getTime() + 10000); // 10 seconds buffer
     const notificationTime = scheduledDate.getTime() <= minNotificationTime.getTime() 
       ? minNotificationTime 
       : scheduledDate;
     
+    // First, try to schedule the notification
+    let notificationId = null;
+    try {
+      const result = await scheduleReminder({
+        title: reminderData.title,
+        body: reminderData.description || 'You have a reminder',
+        datePick: notificationTime,
+        timePick: notificationTime,
+        reminderId: 'temp', // Temporary ID, will be updated after DB creation
+      });
+      notificationId = result.id;
+    } catch (notificationError) {
+      console.error('Failed to schedule reminder notification:', notificationError);
+      throw new Error(`Failed to schedule reminder notification: ${notificationError.message}`);
+    }
+    
+    // If notification scheduling succeeded, create the database entry
     const reminderId = await DatabaseService.createReminder({
       profileId: reminderData.profileId,
       title: reminderData.title,
@@ -294,34 +329,57 @@ export default function AddInteractionScreen() {
       scheduledFor: scheduledDate,
     });
     
-    // Schedule notification
-    try {
-      const result = await scheduleReminder({
-        title: reminderData.title,
-        body: reminderData.description || 'You have a reminder',
-        datePick: notificationTime,
-        timePick: notificationTime,
-        reminderId: reminderId.toString(),
-      });
-      
-      if (result.id) {
-        await DatabaseService.updateReminderNotificationId(reminderId, result.id);
-      }
-    } catch (notificationError) {
-      console.error('Failed to schedule reminder notification:', notificationError);
+    // Update the reminder with the actual notification ID
+    if (notificationId) {
+      await DatabaseService.updateReminderNotificationId(reminderId, notificationId);
     }
   };
 
   const executeScheduleText = async (textData: any) => {
-    const scheduledDate = new Date(textData.scheduledFor);
+    // Parse and validate the scheduled date
+    let scheduledDate;
+    try {
+      scheduledDate = new Date(textData.scheduledFor);
+      if (isNaN(scheduledDate.getTime())) {
+        throw new Error('Invalid date format');
+      }
+    } catch (error) {
+      console.error('Invalid scheduled date:', textData.scheduledFor);
+      throw new Error('Invalid text date provided by AI');
+    }
     
-    // Ensure notification time is at least 5 seconds in the future
+    // Ensure the scheduled time is in the future
     const now = new Date();
-    const minNotificationTime = new Date(now.getTime() + 6000); // 6 seconds buffer
+    if (scheduledDate.getTime() <= now.getTime()) {
+      // If the AI scheduled something in the past, adjust to a reasonable future time
+      scheduledDate = new Date(now.getTime() + 24 * 60 * 60 * 1000); // 24 hours from now
+      scheduledDate.setHours(12, 0, 0, 0); // Set to noon
+      console.warn('AI scheduled text in the past, adjusted to:', scheduledDate.toISOString());
+    }
+    
+    // Calculate notification time with minimum buffer
+    const minNotificationTime = new Date(now.getTime() + 10000); // 10 seconds buffer
     const notificationTime = scheduledDate.getTime() <= minNotificationTime.getTime() 
       ? minNotificationTime 
       : scheduledDate;
     
+    // First, try to schedule the notification
+    let notificationId = null;
+    try {
+      const result = await scheduleScheduledText({
+        messageId: 'temp', // Temporary ID, will be updated after DB creation
+        phoneNumber: textData.phoneNumber,
+        message: textData.message,
+        datePick: notificationTime,
+        timePick: notificationTime,
+      });
+      notificationId = result.id;
+    } catch (notificationError) {
+      console.error('Failed to schedule text notification:', notificationError);
+      throw new Error(`Failed to schedule text notification: ${notificationError.message}`);
+    }
+    
+    // If notification scheduling succeeded, create the database entry
     const textId = await DatabaseService.createScheduledText({
       profileId: textData.profileId,
       phoneNumber: textData.phoneNumber,
@@ -329,21 +387,9 @@ export default function AddInteractionScreen() {
       scheduledFor: scheduledDate,
     });
     
-    // Schedule notification
-    try {
-      const result = await scheduleScheduledText({
-        messageId: textId.toString(),
-        phoneNumber: textData.phoneNumber,
-        message: textData.message,
-        datePick: notificationTime,
-        timePick: notificationTime,
-      });
-      
-      if (result.id) {
-        await DatabaseService.updateScheduledTextNotificationId(textId, result.id);
-      }
-    } catch (notificationError) {
-      console.error('Failed to schedule text notification:', notificationError);
+    // Update the scheduled text with the actual notification ID
+    if (notificationId) {
+      await DatabaseService.updateScheduledTextNotificationId(textId, notificationId);
     }
   };
 

@@ -171,7 +171,17 @@ Remember: Be intelligent but not presumptuous. Extract what's clearly stated or 
       }
 
       // Parse the JSON response
-      const parsedResponse = JSON.parse(response);
+      let parsedResponse;
+      try {
+        if (!response || typeof response !== 'string' || response.trim() === '') {
+          throw new Error('Empty or invalid response from OpenAI');
+        }
+        parsedResponse = JSON.parse(response);
+      } catch (parseError) {
+        console.error('JSON Parse error:', parseError);
+        console.error('Raw OpenAI response:', response);
+        throw new Error('Failed to parse AI response as JSON');
+      }
       
       console.log('🤖 AI Response:', parsedResponse);
       
@@ -247,7 +257,6 @@ Always be conversational and confirm the user's intent clearly.`
   }
 
   mockAdvancedResponse(inputText: string) {
-    // Return a properly structured response object that matches the expected format
     return {
       intent: 'clarify',
       confidence: 0.0,
