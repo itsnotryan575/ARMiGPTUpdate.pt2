@@ -247,16 +247,14 @@ Always be conversational and confirm the user's intent clearly.`
   }
 
   mockAdvancedResponse(inputText: string) {
-    const positiveWords = ['happy', 'great', 'awesome', 'good', 'excited', 'love', 'amazing', 'wonderful', 'fantastic'];
-    const negativeWords = ['sad', 'upset', 'difficult', 'hard', 'worried', 'stressed', 'surgery', 'problem', 'trouble', 'sick'];
-    
-    const lowerText = inputText.toLowerCase();
-    const positiveCount = positiveWords.filter(word => lowerText.includes(word)).length;
-    const negativeCount = negativeWords.filter(word => lowerText.includes(word)).length;
-    
-    if (positiveCount > negativeCount) return 'positive';
-    if (negativeCount > positiveCount) return 'negative';
-    return 'neutral';
+    // Return a properly structured response object that matches the expected format
+    return {
+      intent: 'clarify',
+      confidence: 0.0,
+      actions: [],
+      response: 'I\'m having trouble understanding your request right now. This might be due to a connection issue or the AI service being temporarily unavailable.',
+      clarification: 'Could you please try rephrasing your request? For example:\n• "Add Sarah to my contacts"\n• "Remind me to call mom tomorrow"\n• "Schedule a text to John saying happy birthday"'
+    };
   }
 
   mockReminderResponse(inputText: string, context: any) {
