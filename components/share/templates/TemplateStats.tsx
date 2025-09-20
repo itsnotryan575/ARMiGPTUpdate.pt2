@@ -216,9 +216,9 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '500',
   },
+  tagCount: {
     fontSize: 18,
     fontWeight: '700',
-    color: '#FFFFFF',
     color: '#FFFFFF',
     backgroundColor: 'rgba(255, 255, 255, 0.3)',
     paddingHorizontal: 8,
