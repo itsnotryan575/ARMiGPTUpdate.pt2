@@ -279,6 +279,13 @@ export default function AddInteractionScreen() {
   const executeCreateReminder = async (reminderData: any) => {
     const scheduledDate = new Date(reminderData.scheduledFor);
     
+    // Ensure notification time is at least 5 seconds in the future
+    const now = new Date();
+    const minNotificationTime = new Date(now.getTime() + 6000); // 6 seconds buffer
+    const notificationTime = scheduledDate.getTime() <= minNotificationTime.getTime() 
+      ? minNotificationTime 
+      : scheduledDate;
+    
     const reminderId = await DatabaseService.createReminder({
       profileId: reminderData.profileId,
       title: reminderData.title,
@@ -292,8 +299,8 @@ export default function AddInteractionScreen() {
       const result = await scheduleReminder({
         title: reminderData.title,
         body: reminderData.description || 'You have a reminder',
-        datePick: scheduledDate,
-        timePick: scheduledDate,
+        datePick: notificationTime,
+        timePick: notificationTime,
         reminderId: reminderId.toString(),
       });
       
@@ -308,6 +315,13 @@ export default function AddInteractionScreen() {
   const executeScheduleText = async (textData: any) => {
     const scheduledDate = new Date(textData.scheduledFor);
     
+    // Ensure notification time is at least 5 seconds in the future
+    const now = new Date();
+    const minNotificationTime = new Date(now.getTime() + 6000); // 6 seconds buffer
+    const notificationTime = scheduledDate.getTime() <= minNotificationTime.getTime() 
+      ? minNotificationTime 
+      : scheduledDate;
+    
     const textId = await DatabaseService.createScheduledText({
       profileId: textData.profileId,
       phoneNumber: textData.phoneNumber,
@@ -321,8 +335,8 @@ export default function AddInteractionScreen() {
         messageId: textId.toString(),
         phoneNumber: textData.phoneNumber,
         message: textData.message,
-        datePick: scheduledDate,
-        timePick: scheduledDate,
+        datePick: notificationTime,
+        timePick: notificationTime,
       });
       
       if (result.id) {
