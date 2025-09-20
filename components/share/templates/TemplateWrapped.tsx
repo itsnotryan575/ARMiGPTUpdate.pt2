@@ -236,7 +236,7 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   tagCount: {
-    fontSize: 16,
+    color: '#FFFFFF',
     fontSize: 18,
     fontWeight: '700',
     backgroundColor: 'rgba(255, 255, 255, 0.3)',
@@ -297,6 +297,5 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '500',
     color: 'rgba(255, 255, 255, 0.8)',
-  },
   },
 });
