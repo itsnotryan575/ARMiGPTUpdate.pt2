@@ -1,65 +1,134 @@
+// services/AIService.ts
 import OpenAI from 'openai';
 
-// Initialize OpenAI client - will fallback to mock if API key is not available
+/**
+ * ARMi AI Service
+ * - Injects CURRENT_DATETIME freshly on EVERY call to avoid 'drift'
+ * - Forces all relative time parsing to be based on CURRENT_DATETIME
+ * - Enforces 'future only' timestamps via a tiny post-processor
+ * - Echoes usedCurrentDatetime for logging/debug
+ */
+
 let openai: OpenAI | null = null;
 
 try {
-  // Only initialize if we have a valid API key
   const apiKey = process.env.EXPO_PUBLIC_OPENAI_API_KEY;
   if (apiKey && apiKey.startsWith('sk-')) {
     openai = new OpenAI({
-      apiKey: apiKey,
-      dangerouslyAllowBrowser: true
+      apiKey,
+      dangerouslyAllowBrowser: true,
     });
   }
 } catch (error) {
   console.log('OpenAI not available, using mock responses');
 }
 
+// -------- Time helpers (no external deps) --------
+function getUserTimezone(userTz?: string): string {
+  if (userTz) return userTz;
+  try {
+    // Works in RN/Expo on modern JS engines
+    return Intl.DateTimeFormat().resolvedOptions().timeZone || 'America/New_York';
+  } catch {
+    return 'America/New_York';
+  }
+}
+
+/**
+ * Returns ISO string in UTC for the authoritative "now".
+ * We give the model BOTH CURRENT_DATETIME_UTC and USER_TIMEZONE.
+ * The prompt instructs it to resolve relative dates in USER_TIMEZONE
+ * and to always output ISO WITH timezone offset.
+ */
+function nowIsoUtc(): string {
+  return new Date().toISOString(); // e.g. 2025-09-20T11:36:18.000Z
+}
+
+/** Bump any non-future timestamp forward sensibly (minimal policy: +1 day). */
+function ensureFutureISO(iso: string, nowUtcISO: string): string {
+  try {
+    const dt = new Date(iso);
+    const now = new Date(nowUtcISO);
+    if (isNaN(dt.getTime())) return iso;
+    if (dt <= now) {
+      const bumped = new Date(dt.getTime() + 24 * 60 * 60 * 1000);
+      return bumped.toISOString();
+    }
+    return iso;
+  } catch {
+    return iso;
+  }
+}
+
+function safeJson<T>(raw: string, fallback: T): T {
+  try {
+    return JSON.parse(raw) as T;
+  } catch {
+    return fallback;
+  }
+}
+
+// -------- Types --------
+type ParsedMain = {
+  intent: 'create_profile' | 'update_profile' | 'create_reminder' | 'schedule_text' | 'multi_action' | 'clarify';
+  confidence: number;
+  actions: Array<{
+    type: 'create_profile' | 'update_profile' | 'create_reminder' | 'schedule_text';
+    data: Record<string, any>;
+  }>;
+  response: string;
+  clarification: string | null;
+  // Added for logging/QA:
+  usedCurrentDatetime?: string;
+  note?: string;
+};
+
+type ParsedReminder = {
+  action: 'create' | 'cancel' | 'clarify';
+  title: string | null;
+  description: string | null;
+  type: 'general' | 'health' | 'celebration' | 'career' | 'life_event' | string;
+  scheduledFor: string | null;
+  response: string;
+  // Added:
+  usedCurrentDatetime?: string;
+  note?: string;
+};
+
 class AIServiceClass {
-  async processInteraction(inputText: string) {
+  /**
+   * Main NL → structured actions
+   * Fresh CURRENT_DATETIME is injected every time. No caching.
+   */
+  async processInteraction(inputText: string, userTz?: string, devSimulatedNowISO?: string): Promise<ParsedMain> {
     try {
-      // Check if OpenAI is available
       if (!openai) {
         console.log('OpenAI not configured, using mock processing');
-        return this.mockAdvancedResponse(inputText);
+        const mock = this.mockAdvancedResponse(inputText);
+        (mock as any).usedCurrentDatetime = nowIsoUtc();
+        return mock as ParsedMain;
       }
 
-      // Use GPT-4o for advanced natural language understanding
-      const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
-        messages: [
-          {
-            role: "system",
-            content: `You are ARMi (Artificial Relationship Management Intelligence), an advanced AI assistant that helps users manage their relationships through natural language commands. You excel at understanding complex, informal, slang, and formal requests to perform various relationship management tasks.
+      const USER_TIMEZONE = getUserTimezone(userTz);
+      const CURRENT_DATETIME_UTC = devSimulatedNowISO || nowIsoUtc();
+      const TODAY_UTC_DATE = CURRENT_DATETIME_UTC.slice(0, 10); // yyyy-mm-dd
 
-🎯 YOUR CORE CAPABILITIES:
-1. CREATE/UPDATE PROFILES: Add new people or update existing ones with comprehensive details
-2. CREATE REMINDERS: Set up reminders for follow-ups, birthdays, important events
-3. SCHEDULE TEXTS: Schedule text messages to be sent at specific times
-4. CLARIFY REQUESTS: Ask for more information when requests are unclear
+      const system = `
+You are ARMi (Artificial Relationship Management Intelligence), an assistant that returns ONLY JSON. You must parse intents and schedule times correctly.
 
-🧠 INTELLIGENCE GUIDELINES:
-- Understand slang, informal language, abbreviations, and context clues
-- Make smart inferences from context (e.g., "met Sarah at a club" → Sarah likely enjoys nightlife/clubs)
-- Extract ALL available information but NEVER assume details not present or implied
-- Handle multi-intent requests (e.g., "Add John to my contacts and remind me to call him tomorrow")
-- Parse natural language dates/times into proper formats
-- Distinguish between creating new profiles vs updating existing ones
+# CLOCK & TIME RULES (AUTHORITATIVE)
+- CURRENT_DATETIME_UTC: ${CURRENT_DATETIME_UTC}
+- USER_TIMEZONE: ${USER_TIMEZONE}
+- TODAY_UTC: ${TODAY_UTC_DATE}
 
-🔍 EXTRACTION RULES:
-- NAMES: Extract EXACTLY as written - preserve spelling, capitalization, nicknames
-- AGE: Only if explicitly mentioned as a number (e.g., "she's 25", "around 30")
-- RELATIONSHIPS: Map to: family/friend/partner/coworker/neighbor/acquaintance
-- PREFERENCES: Infer likes/dislikes from context and activities mentioned
-- CONTACT INFO: Extract phone numbers, emails, social media handles
-- FAMILY: Extract kids, siblings, parents only if mentioned
-- WORK: Extract job titles, companies, career details
-- DATES/TIMES: Parse natural language into ISO 8601 format
+1) Treat CURRENT_DATETIME_UTC as the ONLY ground-truth "now".
+2) Resolve ALL relative terms (today, tomorrow, next Friday, in 3 days, etc.) relative to CURRENT_DATETIME_UTC, but interpret in USER_TIMEZONE for local wall-time.
+3) ALWAYS output scheduled times as ISO 8601 **with an explicit timezone offset** (e.g., "2025-09-21T09:00:00-04:00"). If you cannot compute an offset, return a full ISO with 'Z' (UTC).
+4) Output MUST be strictly in the FUTURE relative to CURRENT_DATETIME_UTC. If the parsed time is in the past, roll it forward to the next valid future occurrence and include a short "note" mentioning the roll-forward.
+5) If user says a conflicting "today", IGNORE it unless they explicitly say "pretend today is ..."; even then, final scheduledFor MUST still be future vs CURRENT_DATETIME_UTC.
+6) Deterministic defaults: "morning"→09:00, "afternoon"→15:00, "evening"→19:00, "tonight"→20:00, "noon"→12:00, "midnight"→00:00 (USER_TIMEZONE).
 
-📋 RESPONSE FORMAT:
-Always return a JSON object with this exact structure:
-
+# RESPONSE FORMAT (MANDATORY - JSON only)
 {
   "intent": "create_profile" | "update_profile" | "create_reminder" | "schedule_text" | "multi_action" | "clarify",
   "confidence": number (0.0-1.0),
@@ -67,213 +136,214 @@ Always return a JSON object with this exact structure:
     {
       "type": "create_profile" | "update_profile" | "create_reminder" | "schedule_text",
       "data": {
-        // Profile data for create_profile/update_profile
-        "name": "string (REQUIRED for profiles)",
+        "name": "string | null",
         "age": number | null,
         "phone": "string | null",
-        "email": "string | null", 
-        "relationship": "family|friend|partner|coworker|neighbor|acquaintance",
+        "email": "string | null",
+        "relationship": "family|friend|partner|coworker|neighbor|acquaintance|unknown",
         "job": "string | null",
         "notes": "string | null",
-        "tags": ["array of descriptive tags"],
-        "kids": ["array of children names/descriptions"],
-        "siblings": ["array of sibling names"],
-        "parents": ["array of parent names"],
-        "likes": ["array of things they enjoy"],
-        "dislikes": ["array of things they dislike"],
-        "interests": ["array of hobbies/interests"],
+        "tags": ["array"],
+        "kids": ["array"],
+        "siblings": ["array"],
+        "parents": ["array"],
+        "likes": ["array"],
+        "dislikes": ["array"],
+        "interests": ["array"],
         "instagram": "string | null",
-        "snapchat": "string | null", 
+        "snapchat": "string | null",
         "twitter": "string | null",
         "tiktok": "string | null",
         "facebook": "string | null",
-        "birthday": "string | null (MM/DD/YYYY format)",
-        "lastContactDate": "ISO date string",
-        
-        // Reminder data for create_reminder
-        "title": "string (REQUIRED for reminders)",
+        "birthday": "string | null (MM/DD/YYYY)",
+        "lastContactDate": "ISO string | null",
+
+        // Reminders
+        "title": "string | null",
         "description": "string | null",
-        "reminderType": "general|health|celebration|career|life_event",
-        "scheduledFor": "ISO date string (REQUIRED for reminders)",
+        "reminderType": "general|health|celebration|career|life_event|unknown",
+        "scheduledFor": "ISO string with timezone (REQUIRED for reminders) | null",
         "profileId": number | null,
-        
-        // Scheduled text data for schedule_text
-        "phoneNumber": "string (REQUIRED for texts)",
-        "message": "string (REQUIRED for texts)",
-        "scheduledFor": "ISO date string (REQUIRED for texts)",
+
+        // Scheduled texts
+        "phoneNumber": "string | null",
+        "message": "string | null",
         "profileId": number | null
       }
     }
   ],
-  "response": "string (conversational response to user)",
-  "clarification": "string | null (what you need clarified if intent is 'clarify')"
+  "response": "string",
+  "clarification": "string | null",
+  "usedCurrentDatetime": "echo back CURRENT_DATETIME_UTC you used",
+  "note": "if you rolled-forward or assumed defaults, mention briefly"
 }
-
-🎯 INTENT DETECTION EXAMPLES:
-
-CREATE_PROFILE:
-- "I met Sarah at the gym yesterday"
-- "Add my coworker Mike to my contacts"
-- "New person: Jennifer, 28, works at Google"
-
-UPDATE_PROFILE:
-- "Update Sarah's job to marketing manager"
-- "Mike got a new phone number: 555-1234"
-- "Add a note to Jennifer that she loves hiking"
-
-CREATE_REMINDER:
-- "Remind me to call mom next week"
-- "Set a reminder to follow up with Sarah in 3 days"
-- "Birthday reminder for Mike on March 15th"
-
-SCHEDULE_TEXT:
-- "Schedule a text to Sarah tomorrow saying 'Happy birthday!'"
-- "Send Mike a message next Friday at 2pm"
-- "Text Jennifer 'How was your vacation?' on Monday"
-
-MULTI_ACTION:
-- "Add Sarah to my contacts and remind me to call her tomorrow"
-- "Update Mike's job and schedule a congratulations text"
-
-CLARIFY:
-- "Do something with Sarah" (unclear intent)
-- "Remind me about that thing" (missing details)
-
-🕐 DATE/TIME PARSING:
-Convert natural language to ISO 8601:
-- "tomorrow" → next day at 12:00 PM
-- "next week" → 7 days from now at 12:00 PM  
-- "Friday at 3pm" → next Friday at 3:00 PM
-- "in 2 hours" → current time + 2 hours
-- "March 15th" → March 15th of current/next year at 12:00 PM
-
-🎨 SMART INFERENCE EXAMPLES:
-- "met at a club" → tags: ["social"], likes: ["nightlife", "dancing"]
-- "works at Google" → job: "Software Engineer" (if not specified), tags: ["tech"]
-- "has twin boys" → kids: ["twin boy 1", "twin boy 2"], tags: ["parent"]
-- "loves hiking" → likes: ["hiking"], interests: ["outdoors"], tags: ["outdoorsy"]
-- "can't stand spicy food" → dislikes: ["spicy food"]
-
-Remember: Be intelligent but not presumptuous. Extract what's clearly stated or strongly implied, but don't fabricate details.`
-          },
-          {
-            role: "user",
-            content: inputText
-          }
-        ],
-        temperature: 0.1,
-        max_tokens: 2000
-      });
-
-      const response = completion.choices[0]?.message?.content;
-      if (!response) {
-        throw new Error('No response from OpenAI');
-      }
-
-      // Parse the JSON response
-      let parsedResponse;
-      try {
-        if (!response || typeof response !== 'string' || response.trim() === '') {
-          throw new Error('Empty or invalid response from OpenAI');
-        }
-        parsedResponse = JSON.parse(response);
-      } catch (parseError) {
-        console.error('JSON Parse error:', parseError);
-        console.error('Raw OpenAI response:', response);
-        throw new Error('Failed to parse AI response as JSON');
-      }
-      
-      console.log('🤖 AI Response:', parsedResponse);
-      
-      return parsedResponse;
-    } catch (error) {
-      console.error('Error processing with OpenAI:', error);
-      
-      // Fallback to mock processing if API fails
-      return this.mockAdvancedResponse(inputText);
-    }
-  }
-
-  async processReminderResponse(inputText: string, context: any) {
-    try {
-      if (!openai) {
-        return this.mockReminderResponse(inputText, context);
-      }
+`.trim();
 
       const completion = await openai.chat.completions.create({
-        model: "gpt-4o",
+        model: 'gpt-4o',
+        temperature: 0,
+        max_tokens: 2000,
         messages: [
-          {
-            role: "system",
-            content: `You are ARMi, helping users manage reminder responses. The user is responding to a reminder suggestion with natural language.
-
-CONTEXT: The user was suggested a reminder and is now responding naturally with their preferences.
-
-Your job is to:
-1. Parse their response to understand what they want
-2. Extract specific dates/times if mentioned
-3. Determine if they want to create the reminder or not
-4. Handle complex natural language like "set it for next Thursday at 4pm" or "yes that works perfect"
-5. Return structured data for reminder creation
-
-Return JSON in this format:
-{
-  "action": "create" | "cancel" | "clarify",
-  "title": "string (reminder title)",
-  "description": "string (reminder description)", 
-  "type": "string (general/health/celebration/career/life_event)",
-  "scheduledFor": "ISO date string or null",
-  "response": "string (conversational response to user)"
-}
-
-Handle natural language time expressions like:
-- "tomorrow", "next week", "next Thursday", "in 3 days"
-- "at 4pm", "at 2:30", "in the morning", "this evening"
-- "yes", "sure", "that works", "sounds good" (use suggested timing)
-- "no", "nah", "not now", "maybe later" (cancel)
-- "yes but...", "sure but...", "that works but..." (modify the suggestion)
-
-Always be conversational and confirm the user's intent clearly.`
-          },
-          {
-            role: "user",
-            content: `Context: ${JSON.stringify(context)}\n\nUser response: ${inputText}`
-          }
+          { role: 'system', content: system },
+          { role: 'user', content: inputText },
         ],
-        temperature: 0.1,
-        max_tokens: 500
       });
 
-      const response = completion.choices[0]?.message?.content;
-      if (!response) {
-        throw new Error('No response from OpenAI');
+      const raw = completion.choices[0]?.message?.content ?? '';
+      if (!raw) throw new Error('No response from OpenAI');
+
+      // Parse JSON safely
+      const parsed = safeJson<ParsedMain>(raw, {
+        intent: 'clarify',
+        confidence: 0,
+        actions: [],
+        response: "I'm not sure yet.",
+        clarification: 'Please rephrase.',
+        usedCurrentDatetime: CURRENT_DATETIME_UTC,
+      });
+
+      // Post-process: enforce "future only" for any scheduledFor
+      let noteAdded = false;
+      if (parsed.actions?.length) {
+        parsed.actions = parsed.actions.map(a => {
+          const d = a.data || {};
+          if (typeof d.scheduledFor === 'string' && d.scheduledFor.trim()) {
+            const before = d.scheduledFor;
+            const after = ensureFutureISO(before, CURRENT_DATETIME_UTC);
+            if (after !== before) {
+              noteAdded = true;
+              d.scheduledFor = after;
+            }
+          }
+          return { ...a, data: d };
+        });
       }
 
-      return JSON.parse(response);
-    } catch (error) {
-      console.error('Error processing reminder response:', error);
-      throw new Error(`AI reminder processing failed: ${error.message}`);
+      parsed.usedCurrentDatetime = CURRENT_DATETIME_UTC;
+      if (noteAdded) {
+        parsed.note = (parsed.note ? parsed.note + ' ' : '') + 'Rolled past time forward to keep it in the future.';
+      }
+
+      console.log('🤖 AI Response:', parsed);
+      return parsed;
+    } catch (error: any) {
+      console.error('Error processing with OpenAI:', error);
+      const mock = this.mockAdvancedResponse(inputText);
+      (mock as any).usedCurrentDatetime = nowIsoUtc();
+      return mock as ParsedMain;
     }
   }
 
+  /**
+   * Follow-up flow for reminder suggestions/confirmations
+   * (Same CURRENT_DATETIME rules; also enforces future-only)
+   */
+  async processReminderResponse(inputText: string, context: any, userTz?: string, devSimulatedNowISO?: string): Promise<ParsedReminder> {
+    try {
+      if (!openai) {
+        const mock = this.mockReminderResponse(inputText, context);
+        (mock as any).usedCurrentDatetime = nowIsoUtc();
+        return mock as ParsedReminder;
+      }
+
+      const USER_TIMEZONE = getUserTimezone(userTz);
+      const CURRENT_DATETIME_UTC = devSimulatedNowISO || nowIsoUtc();
+      const TODAY_UTC_DATE = CURRENT_DATETIME_UTC.slice(0, 10);
+
+      const system = `
+You are ARMi, handling reminder confirmations. Return ONLY JSON.
+
+# CLOCK & TIME RULES
+- CURRENT_DATETIME_UTC: ${CURRENT_DATETIME_UTC}
+- USER_TIMEZONE: ${USER_TIMEZONE}
+- TODAY_UTC: ${TODAY_UTC_DATE}
+
+1) Resolve all relative times from CURRENT_DATETIME_UTC, in USER_TIMEZONE.
+2) Always output ISO 8601 with explicit timezone when possible; otherwise UTC 'Z'.
+3) Output must be strictly future vs CURRENT_DATETIME_UTC; roll-forward if needed and add a short "note".
+4) Deterministic defaults: morning=09:00, afternoon=15:00, evening=19:00, tonight=20:00 (USER_TIMEZONE).
+
+# OUTPUT (JSON only)
+{
+  "action": "create" | "cancel" | "clarify",
+  "title": "string | null",
+  "description": "string | null",
+  "type": "general" | "health" | "celebration" | "career" | "life_event",
+  "scheduledFor": "ISO string or null",
+  "response": "string",
+  "usedCurrentDatetime": "echo CURRENT_DATETIME_UTC",
+  "note": "string | null"
+}
+`.trim();
+
+      const completion = await openai.chat.completions.create({
+        model: 'gpt-4o',
+        temperature: 0,
+        max_tokens: 700,
+        messages: [
+          { role: 'system', content: system },
+          {
+            role: 'user',
+            content: `Context: ${JSON.stringify(context)}\n\nUser response: ${inputText}`,
+          },
+        ],
+      });
+
+      const raw = completion.choices[0]?.message?.content ?? '';
+      if (!raw) throw new Error('No response from OpenAI');
+
+      const parsed = safeJson<ParsedReminder>(raw, {
+        action: 'clarify',
+        title: null,
+        description: null,
+        type: 'general',
+        scheduledFor: null,
+        response: 'Please clarify.',
+        usedCurrentDatetime: CURRENT_DATETIME_UTC,
+        note: null,
+      });
+
+      // Enforce future
+      if (typeof parsed.scheduledFor === 'string' && parsed.scheduledFor.trim()) {
+        const before = parsed.scheduledFor;
+        const after = ensureFutureISO(before, CURRENT_DATETIME_UTC);
+        if (after !== before) {
+          parsed.scheduledFor = after;
+          parsed.note = (parsed.note ? parsed.note + ' ' : '') + 'Rolled past time forward to keep it in the future.';
+        }
+      }
+
+      parsed.usedCurrentDatetime = CURRENT_DATETIME_UTC;
+      return parsed;
+    } catch (error: any) {
+      console.error('Error processing reminder response:', error);
+      const fallback = this.mockReminderResponse(inputText, context);
+      (fallback as any).usedCurrentDatetime = nowIsoUtc();
+      return fallback as ParsedReminder;
+    }
+  }
+
+  // -------- Mocks --------
   mockAdvancedResponse(inputText: string) {
     return {
       intent: 'clarify',
       confidence: 0.0,
       actions: [],
-      response: 'I\'m having trouble understanding your request right now. This might be due to a connection issue or the AI service being temporarily unavailable.',
-      clarification: 'Could you please try rephrasing your request? For example:\n• "Add Sarah to my contacts"\n• "Remind me to call mom tomorrow"\n• "Schedule a text to John saying happy birthday"'
+      response:
+        "I'm having trouble understanding your request right now. This might be due to a connection issue or the AI service being temporarily unavailable.",
+      clarification:
+        'Could you please try rephrasing your request? For example:\n• "Add Sarah to my contacts"\n• "Remind me to call mom tomorrow"\n• "Schedule a text to John saying happy birthday"',
     };
   }
 
-  mockReminderResponse(inputText: string, context: any) {
+  mockReminderResponse(_inputText: string, _context: any) {
     return {
       action: 'create',
       title: 'Mock Reminder',
       description: 'This is a mock reminder response',
       type: 'general',
       scheduledFor: new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString(),
-      response: 'Mock reminder created successfully!'
+      response: 'Mock reminder created successfully!',
     };
   }
 }
